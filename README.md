@@ -1,160 +1,146 @@
-# Atomistic Simulations using LAMMPS
+# Aluminum Metal Extrusion — LAMMPS Molecular Dynamics Simulation
 
 
-<img width="1600" height="1200" alt="extrusion" src="https://github.com/user-attachments/assets/3b38f264-1ef2-4745-ac17-378295ecb0d3" />
+<img width="1600" height="1200" alt="extrusion" src="https://github.com/user-attachments/assets/5f2a8761-2d75-41e1-a03a-411b3122ff7e" />
 
-**Author:** Akshansh Mishra
-**GitHub:** [@akshansh11](https://github.com/akshansh11)
-
----
-
-Molecular dynamics simulations built and validated in LAMMPS (7 Feb 2024). The repository covers four physically distinct problems — soft robotics, tribology, soft matter fracture, and metal forming — each modelled from geometry construction through potential assignment to trajectory analysis. Every script is a working input file, not a template.
-
-All metal simulations use the Al99.eam.alloy EAM potential. Soft matter simulations use LJ/cut pair interactions and FENE bond potentials in reduced LJ units. Trajectories are written in LAMMPS custom dump format for direct import into OVITO.
+**Author:** Akshansh Mishra  
+**GitHub:** [akshansh11](https://github.com/akshansh11)
 
 ---
 
-## Simulations
+## Overview
 
-### Soft Robotic Actuator
+This repository contains a LAMMPS input script for simulating the direct extrusion of aluminum at the atomic scale using molecular dynamics. The simulation models a three-component setup — a punch, a billet, and a die — constructed from FCC aluminum atoms and driven by an embedded atom method (EAM) potential.
 
-A coarse-grained pneumatic finger modelled as a 10x3x3 bead-spring lattice in LJ units. Three atom layers represent the fixed base, free body, and pressurised chamber wall. FENE bonds connect nearest neighbours. Pressure is applied as a per-atom force that ramps from zero over 50,000 steps, driving the actuator from flat to bent and back.
-
-```
-units        lj
-bond_style   fene
-fix          addforce  with variable pressure v_p_act
-```
-
-The simulation runs in three phases: inflation, hold, and deflation. Tip displacement is tracked throughout using a COM compute on the free end group.
+The script has been corrected to eliminate NaN energy values caused by atom overlaps at region interfaces. A gap variable ensures no two adjacent regions share boundary atoms.
 
 ---
 
-### Rolling Sphere on Aluminium Slab
+## Simulation Setup
 
-A cold aluminium sphere rolling across a hot Al slab under EAM forces. The sphere is treated as a rigid indenter using `fix rigid/nve` combined with a prescribed rolling velocity set from the no-slip condition at the contact point.
+### Components
 
-```
-Rolling velocity :  vx_cm  = 3.0  Ang/ps
-Angular velocity :  omega  = 0.15 rad/ps   ( = vx / R )
-No-slip check    :  vx at bottom atom = 3.0 - 0.15*20 = 0  (correct)
-```
+| Component | Atom Type | Role |
+|-----------|-----------|------|
+| Billet    | 1         | Deformable aluminum workpiece |
+| Die       | 2         | Fixed constraint with extrusion opening |
+| Punch     | 3         | Rigid indenter driving the billet |
 
-The slab is thermostated at 700 K throughout. The sphere carries no thermostat and no thermal motion — it is a prescribed rigid body. Per-atom von Mises stress and hydrostatic pressure are computed at every dump step. The Hertzian contact zone and the stress wave propagating ahead of the sphere are both visible in OVITO.
+### Geometry
 
-Output files:
+The simulation box is constructed in lattice units based on the FCC aluminum lattice parameter `a = 4.05 Angstrom`. The key dimensions are:
+
+- Punch length: 3 lattice units
+- Billet length: 30 lattice units
+- Die thickness: 5 lattice units
+- Die opening (extrusion channel): 10 lattice units
+- Billet height: 20 lattice units
+- Box depth (z): 8 lattice units
+
+A `gap = 0.6` lattice units is inserted at every component interface to prevent atom overlap during initialization.
+
+### Boundary Conditions
+
+- x: periodic
+- y: shrink-wrapped (non-periodic, free surface)
+- z: periodic
+
+---
+
+## Simulation Phases
+
+### Phase 0 — Minimization
+
+Before any dynamics, a two-stage energy minimization is performed:
+
+1. `quickmin` — robust for systems with severe overlaps or near-infinite forces
+2. `cg` (conjugate gradient) — fine refinement to convergence tolerances
+
+Both the die and punch are held fixed during this phase. The `thermo_modify lost warn` flag is set to prevent abrupt crashes if atoms drift outside the box during early minimization.
+
+### Phase 1 — Thermal Equilibration (10 ps)
+
+The billet is brought to 300 K using an NVT thermostat (Nose-Hoover, damping constant 0.1 ps). Top and bottom billet rows are held fixed to simulate die contact boundary conditions. The die and punch remain stationary.
+
+### Phase 2 — Extrusion (50 ps)
+
+The punch is displaced along the +x direction at a constant velocity of `0.5` lattice units per picosecond using `fix move linear`. Per-atom von Mises stress is computed and dumped every 200 steps. The die reaction force along x is tracked throughout.
+
+### Phase 3 — Hold (10 ps)
+
+The punch is stopped and the system is allowed to relax. This captures springback and residual stress redistribution after extrusion.
+
+---
+
+## Output Files
 
 | File | Contents |
 |------|----------|
-| `stress_rolling.lammpstrj` | Per-atom position + full stress tensor + von Mises |
-| `temp_rolling.lammpstrj` | Per-atom kinetic energy for temperature mapping |
-| `sphere_com.txt` | Sphere centre of mass vs time |
-| `slab_stress_vs_time.txt` | Global slab pressure in GPa vs timestep |
+| `extrusion.lammpstrj` | Per-atom trajectory: id, type, x, y, z, von Mises stress |
+| `extrusion_force.txt` | Time-averaged punch position and die reaction force |
+| `extrusion_final.restart` | Binary restart file at end of simulation |
 
 ---
 
-### Spider Web Impact
+## Von Mises Stress
 
-A coarse-grained spider web generated in Python and simulated under sphere impact in LAMMPS. The web consists of 12 radial threads and 8 spiral rings built as a bead-spring network. Outer boundary beads are pinned as a fixed atom type, removing any dependency on region-based grouping.
-
-Bond parameters are set to approximate the real mechanical contrast between dragline and capture silk:
-
-| Thread type | Bond coeff K | Max extension R0 | Physical basis |
-|-------------|-------------|------------------|----------------|
-| Radial (type 1) | 30.0 | 1.5 | Stiff dragline silk, breaks at ~50% extension |
-| Spiral (type 2) | 10.0 | 2.0 | Soft capture silk, breaks at ~100% extension |
-
-The stiffness ratio of 3:1 matches experimental measurements of real spider webs. The sphere is a single heavy atom (mass 50) falling under gravity. Under sufficient impact the central bonds fail first and fracture propagates radially outward — the same sequence observed in physical web damage experiments.
-
-To generate the web geometry and run:
-
-```bash
-python generate_web.py
-lmp -in in.spiderweb
-```
-
----
-
-### Direct Extrusion of Aluminium
-
-Forward extrusion of an FCC aluminium billet through a rigid die at 2:1 reduction ratio. The punch advances at 0.5 Ang/ps using `fix move linear`. The die is fully frozen. The billet is thermostated at 300 K with NVT. Per-atom von Mises stress is computed throughout and the die reaction force is logged every 200 steps.
-
-Geometry (lattice units, a = 4.05 Ang):
+Per-atom von Mises stress is computed from the stress tensor components output by `compute stress/atom`:
 
 ```
-Punch     :   3 units thick
-Billet    :  30 x 20 x 8 units
-Die       :   5 units thick, opening = 10 units  (ratio 2:1)
-Collection:  30 units downstream
+vm = sqrt( 0.5 * [ (sxx-syy)^2 + (syy-szz)^2 + (szz-sxx)^2
+                   + 6*(sxy^2 + sxz^2 + syz^2) ] )
 ```
 
-Three deformation zones appear in the trajectory:
-
-**Dead zone.** The corner where the billet face meets the die wall. Atoms stagnate here with near-zero velocity and low von Mises stress. In industrial extrusion this region can detach and emerge as a surface defect. The simulation shows its formation and growth in real time.
-
-**Shear band.** A 45-degree band of intense plastic flow running from the punch face to the die opening. Von Mises stress peaks here. The original FCC crystal order is destroyed within this band as atoms are sheared into new configurations.
-
-**Extrudate.** Material that has passed through the die opening and is now flowing freely downstream. Cross-section is half the billet height. Crystal structure is gone.
-
-The file `extrusion_force.txt` contains punch position and die reaction force at every logged step. Plotting force against position gives the load-displacement curve with a clear peak at extrusion onset followed by a drop to steady-state flow.
+This quantity is written per atom to the trajectory file and can be visualized directly in OVITO.
 
 ---
 
 ## Requirements
 
-- LAMMPS 7 Feb 2024 or later
-- `Al99.eam.alloy` potential file — available from the [NIST Interatomic Potentials Repository](https://www.ctcms.nist.gov/potentials/)
-- Python 3.x with NumPy (spider web geometry generation only)
-- OVITO 3.x for trajectory visualization
-
-Place `Al99.eam.alloy` in the same directory as the input script before running any simulation in metal units.
+- LAMMPS (any recent stable release with EAM support)
+- EAM potential file: `Al99.eam.alloy`  
+  Available from the [NIST Interatomic Potentials Repository](https://www.ctcms.nist.gov/potentials/)
 
 ---
 
-## OVITO Visualization
+## Usage
 
-All trajectories are in LAMMPS custom dump format and open directly in OVITO via File > Load File.
+```bash
+mpirun -np 4 lmp -in al_extrusion.lammps
+```
 
-**Von Mises stress:**
-Add a Color Coding modifier. Set property to `vm_stress`, colormap to Hot, range 0 to 20000. Disable auto-adjust range so the scale stays consistent across frames.
+Or for serial execution:
 
-**Temperature (kinetic energy):**
-Load `temp_rolling.lammpstrj`. Add Color Coding on `c_atom_ke`, colormap Rainbow, range 0 to 0.15 eV.
+```bash
+lmp -in al_extrusion.lammps
+```
 
-**Bond fracture in spider web:**
-Add a Create Bonds modifier set to show only bonds shorter than 1.8 sigma. Broken bonds disappear as atoms separate beyond R0. Fracture sequence is visible frame by frame.
+Visualization of the output trajectory is best done with [OVITO](https://www.ovito.org/), using the von Mises stress field for color mapping.
 
 ---
 
-## Repository Structure
+## Known Issues and Fixes
 
-```
-.
-├── soft_robot/
-│   └── in.soft_robot
-├── rolling_sphere/
-│   └── in.rolling
-├── spider_web/
-│   ├── generate_web.py
-│   └── in.spiderweb
-├── extrusion/
-│   └── in.extrusion
-└── README.md
-```
+### NaN Potential Energy During Minimization
+
+**Root cause:** Adjacent regions (punch/billet, billet/die) shared exact boundary coordinates in lattice units, causing atoms from neighboring regions to be placed on top of each other. This produced infinite pair forces and NaN energies.
+
+**Fix:** A `gap = 0.6` lattice unit offset was added at every interface. Each region's boundaries were pre-computed with this gap factored in so no two regions can share boundary atoms.
+
+**Additional fix:** `quickmin` is used as the first minimization pass. Unlike conjugate gradient, quickmin uses a velocity damping scheme that can recover from near-infinite forces without immediately diverging.
 
 ---
 
 ## License
 
-[![CC BY-NC 4.0](https://licensebuttons.net/l/by-nc/4.0/88x31.png)](https://creativecommons.org/licenses/by-nc/4.0/)
+[![License: CC BY-NC 4.0](https://licensebuttons.net/l/by-nc/4.0/88x31.png)](https://creativecommons.org/licenses/by-nc/4.0/)
 
 This work is licensed under a [Creative Commons Attribution-NonCommercial 4.0 International License](https://creativecommons.org/licenses/by-nc/4.0/).
 
-You are free to share and adapt the material for any non-commercial purpose, provided that appropriate credit is given to **Akshansh Mishra**, a link to the license is included, and any changes are indicated. Commercial use of any kind is not permitted without prior written permission from the author.
+You are free to share and adapt this material for non-commercial purposes, provided appropriate credit is given to **Akshansh Mishra** and a link to the license is included. Commercial use is not permitted.
 
 ---
 
 ## Contact
 
-**Akshansh Mishra**
-GitHub: [akshansh11](https://github.com/akshansh11)
+For questions or contributions, open an issue or reach out via GitHub: [github.com/akshansh11](https://github.com/akshansh11)
