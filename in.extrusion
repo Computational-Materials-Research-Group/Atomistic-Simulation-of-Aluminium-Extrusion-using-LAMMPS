@@ -1,0 +1,221 @@
+# Al Metal Extrusion - Fixed NaN (overlap at interfaces)
+# Root cause: regions share exact boundaries so atoms from
+# adjacent regions sit on top of each other
+# Fix: add 0.6 lattice unit gap at every interface
+
+units           metal
+dimension       3
+boundary        p s p
+atom_style      atomic
+
+variable        a           equal 4.05
+
+# Geometry (lattice units)
+variable        punch_x     equal 3
+variable        billet_x    equal 30
+variable        die_x       equal 5
+variable        opening     equal 10
+variable        billet_y    equal 20
+variable        box_z       equal 8
+
+variable        box_x       equal ${punch_x}+${billet_x}+${die_x}+30
+variable        box_y       equal ${billet_y}+4
+
+# Gap between components - prevents atom overlap at interfaces
+variable        gap         equal 0.6
+
+# Pre-computed boundaries with gaps
+# punch  :  0          to  punch_x - gap
+# billet :  punch_x    to  punch_x + billet_x
+# die    :  billet end + gap  to  billet end + gap + die_x
+
+variable        punch_xhi   equal ${punch_x}-${gap}
+
+variable        bil_xlo     equal ${punch_x}
+variable        bil_xhi     equal ${punch_x}+${billet_x}
+
+variable        die_xlo     equal ${punch_x}+${billet_x}+${gap}
+variable        die_xhi     equal ${punch_x}+${billet_x}+${gap}+${die_x}
+
+variable        gap_lo      equal (${billet_y}-${opening})/2
+variable        gap_hi      equal ${gap_lo}+${opening}
+
+# Die inner faces need gap so billet does not overlap die
+variable        die_top_ylo equal ${gap_hi}+${gap}
+variable        die_bot_yhi equal ${gap_lo}-${gap}
+
+variable        v_punch     equal 0.5
+
+# ===========================================================
+# CREATE BOX
+# ===========================================================
+
+lattice         fcc ${a}
+
+region          simbox block 0 ${box_x} 0 ${box_y} 0 ${box_z} units lattice
+create_box      3 simbox
+
+# Billet (type 1)
+region          billet_reg block      &
+                ${bil_xlo} ${bil_xhi} &
+                0 ${billet_y}         &
+                0 ${box_z} units lattice
+create_atoms    1 region billet_reg
+
+# Die top (type 2) - above die opening
+region          die_top_reg block        &
+                ${die_xlo} ${die_xhi}    &
+                ${die_top_ylo} ${box_y}  &
+                0 ${box_z} units lattice
+create_atoms    2 region die_top_reg
+
+# Die bottom (type 2) - below die opening
+region          die_bot_reg block        &
+                ${die_xlo} ${die_xhi}    &
+                0 ${die_bot_yhi}         &
+                0 ${box_z} units lattice
+create_atoms    2 region die_bot_reg
+
+# Punch (type 3) - gap before billet
+region          punch_reg block   &
+                0 ${punch_xhi}    &
+                0 ${billet_y}     &
+                0 ${box_z} units lattice
+create_atoms    3 region punch_reg
+
+mass            1 26.982
+mass            2 26.982
+mass            3 26.982
+
+# ===========================================================
+# POTENTIAL
+# ===========================================================
+
+pair_style      eam/alloy
+pair_coeff      * * Al99.eam.alloy Al Al Al
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+# ===========================================================
+# GROUPS
+# ===========================================================
+
+group           billet  type 1
+group           die     type 2
+group           punch   type 3
+
+variable        bil_top_lo equal ${billet_y}-1
+
+region          bil_top_reg block         &
+                ${bil_xlo} ${bil_xhi}     &
+                ${bil_top_lo} ${billet_y} &
+                0 ${box_z} units lattice
+
+region          bil_bot_reg block      &
+                ${bil_xlo} ${bil_xhi}  &
+                0 1                    &
+                0 ${box_z} units lattice
+
+group           billet_top  region bil_top_reg
+group           billet_bot2 region bil_bot_reg
+group           billet_edge union billet_top billet_bot2
+group           billet_free subtract billet billet_edge
+
+# ===========================================================
+# COMPUTES
+# ===========================================================
+
+compute         T_billet     billet_free temp
+compute         punch_com    punch       com
+variable        punch_pos    equal c_punch_com[1]
+
+compute         patom_stress all stress/atom NULL
+variable        sxx atom c_patom_stress[1]
+variable        syy atom c_patom_stress[2]
+variable        szz atom c_patom_stress[3]
+variable        sxy atom c_patom_stress[4]
+variable        sxz atom c_patom_stress[5]
+variable        syz atom c_patom_stress[6]
+variable        vm_stress atom sqrt(0.5*((v_sxx-v_syy)^2+(v_syy-v_szz)^2+(v_szz-v_sxx)^2+6*(v_sxy^2+v_sxz^2+v_syz^2)))
+
+compute         die_force    die group/group billet
+variable        F_die_x      equal c_die_force[1]
+
+# ===========================================================
+# PHASE 0: Aggressive minimization - removes all overlaps
+# ===========================================================
+
+fix             f_die_hold    die    setforce 0.0 0.0 0.0
+fix             f_punch_hold  punch  setforce 0.0 0.0 0.0
+fix             f_bil_hold    billet setforce 0.0 0.0 0.0
+velocity        all set 0.0 0.0 0.0
+
+# quickmin first - more robust for overlapping atoms
+min_style       quickmin
+minimize        0.0 1.0 1000 10000
+
+# Refine with conjugate gradient
+min_style       cg
+minimize        1.0e-4 1.0e-6 10000 100000
+
+thermo          1
+thermo_style    custom step pe ke etotal
+thermo_modify   lost warn
+
+run             0
+
+# ===========================================================
+# PHASE 1: Equilibrate billet at 300 K (10 ps)
+# ===========================================================
+
+unfix           f_bil_hold
+
+velocity        billet_free create 300.0 48291 dist gaussian
+fix             f_nvt       billet_free nvt temp 300.0 300.0 0.1
+fix             f_edge_fix  billet_edge setforce 0.0 0.0 0.0
+
+timestep        0.001
+thermo          500
+thermo_style    custom step c_T_billet pe ke etotal
+thermo_modify   lost warn
+
+run             10000
+
+# ===========================================================
+# PHASE 2: Extrusion - punch moves +x (50 ps)
+# ===========================================================
+
+unfix           f_punch_hold
+
+fix             f_die_still   die   setforce 0.0 0.0 0.0
+velocity        die set 0.0 0.0 0.0
+
+fix             f_punch_move  punch move linear ${v_punch} 0.0 0.0
+fix             f_punch_force punch setforce 0.0 0.0 0.0
+
+thermo          200
+thermo_style    custom step c_T_billet v_punch_pos v_F_die_x pe ke etotal
+thermo_modify   lost warn
+
+dump            1 all custom 200 extrusion.lammpstrj &
+                id type x y z v_vm_stress
+dump_modify     1 sort id
+
+fix             f_log all ave/time 200 1 200 &
+                v_punch_pos v_F_die_x        &
+                file extrusion_force.txt
+
+run             50000
+
+# ===========================================================
+# PHASE 3: Hold (10 ps)
+# ===========================================================
+
+unfix           f_punch_move
+fix             f_punch_still punch setforce 0.0 0.0 0.0
+velocity        punch set 0.0 0.0 0.0
+
+run             10000
+
+write_restart   extrusion_final.restart
